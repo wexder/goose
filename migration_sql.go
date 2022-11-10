@@ -1,10 +1,11 @@
 package goose
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"regexp"
-
-	"github.com/pkg/errors"
+	"time"
 )
 
 // Run a migration specified in raw SQL.
@@ -15,43 +16,45 @@ import (
 //
 // All statements following an Up or Down directive are grouped together
 // until another direction directive is found.
-func runSQLMigration(db *sql.DB, statements []string, useTx bool, v int64, direction bool) error {
+func runSQLMigration(ctx context.Context, db *sql.DB, statements []string, useTx bool, v int64, direction bool, noVersioning bool) error {
 	if useTx {
 		// TRANSACTION.
 
 		verboseInfo("Begin transaction")
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return errors.Wrap(err, "failed to begin transaction")
+			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 
 		for _, query := range statements {
 			verboseInfo("Executing statement: %s\n", clearStatement(query))
-			if _, err = tx.Exec(query); err != nil {
+			if err = execQuery(ctx, tx.ExecContext, query); err != nil {
 				verboseInfo("Rollback transaction")
 				tx.Rollback()
-				return errors.Wrapf(err, "failed to execute SQL query %q", clearStatement(query))
+				return fmt.Errorf("failed to execute SQL query %q: %w", clearStatement(query), err)
 			}
 		}
 
-		if direction {
-			if _, err := tx.Exec(GetDialect().insertVersionSQL(), v, direction); err != nil {
-				verboseInfo("Rollback transaction")
-				tx.Rollback()
-				return errors.Wrap(err, "failed to insert new goose version")
-			}
-		} else {
-			if _, err := tx.Exec(GetDialect().deleteVersionSQL(), v); err != nil {
-				verboseInfo("Rollback transaction")
-				tx.Rollback()
-				return errors.Wrap(err, "failed to delete goose version")
+		if !noVersioning {
+			if direction {
+				if err := execQuery(ctx, tx.ExecContext, GetDialect().insertVersionSQL(), v, direction); err != nil {
+					verboseInfo("Rollback transaction")
+					tx.Rollback()
+					return fmt.Errorf("failed to insert new goose version: %w", err)
+				}
+			} else {
+				if err := execQuery(ctx, tx.ExecContext, GetDialect().deleteVersionSQL(), v); err != nil {
+					verboseInfo("Rollback transaction")
+					tx.Rollback()
+					return fmt.Errorf("failed to delete goose version: %w", err)
+				}
 			}
 		}
 
 		verboseInfo("Commit transaction")
 		if err := tx.Commit(); err != nil {
-			return errors.Wrap(err, "failed to commit transaction")
+			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
 		return nil
@@ -60,15 +63,48 @@ func runSQLMigration(db *sql.DB, statements []string, useTx bool, v int64, direc
 	// NO TRANSACTION.
 	for _, query := range statements {
 		verboseInfo("Executing statement: %s", clearStatement(query))
-		if _, err := db.Exec(query); err != nil {
-			return errors.Wrapf(err, "failed to execute SQL query %q", clearStatement(query))
+		if err := execQuery(ctx, db.ExecContext, query); err != nil {
+			return fmt.Errorf("failed to execute SQL query %q: %w", clearStatement(query), err)
 		}
 	}
-	if _, err := db.Exec(GetDialect().insertVersionSQL(), v, direction); err != nil {
-		return errors.Wrap(err, "failed to insert new goose version")
+	if !noVersioning {
+		if direction {
+			if err := execQuery(ctx, db.ExecContext, GetDialect().insertVersionSQL(), v, direction); err != nil {
+				return fmt.Errorf("failed to insert new goose version: %w", err)
+			}
+		} else {
+			if err := execQuery(ctx, db.ExecContext, GetDialect().deleteVersionSQL(), v); err != nil {
+				return fmt.Errorf("failed to delete goose version: %w", err)
+			}
+		}
 	}
 
 	return nil
+}
+
+func execQuery(ctx context.Context, fn func(context.Context, string, ...interface{}) (sql.Result, error), query string, args ...interface{}) error {
+	if !verbose {
+		_, err := fn(ctx, query, args...)
+		return err
+	}
+
+	ch := make(chan error)
+
+	go func() {
+		_, err := fn(ctx, query, args...)
+		ch <- err
+	}()
+
+	t := time.Now()
+
+	for {
+		select {
+		case err := <-ch:
+			return err
+		case <-time.Tick(time.Minute):
+			verboseInfo("Executing statement still in progress for %v", time.Since(t).Round(time.Second))
+		}
+	}
 }
 
 const (

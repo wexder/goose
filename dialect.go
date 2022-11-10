@@ -25,11 +25,11 @@ func GetDialect() SQLDialect {
 // SetDialect sets the SQLDialect
 func SetDialect(d string) error {
 	switch d {
-	case "postgres":
+	case "postgres", "pgx":
 		dialect = &PostgresDialect{}
 	case "mysql":
 		dialect = &MySQLDialect{}
-	case "sqlite3":
+	case "sqlite3", "sqlite":
 		dialect = &Sqlite3Dialect{}
 	case "mssql":
 		dialect = &SqlServerDialect{}
@@ -37,6 +37,8 @@ func SetDialect(d string) error {
 		dialect = &RedshiftDialect{}
 	case "tidb":
 		dialect = &TiDBDialect{}
+	case "clickhouse":
+		dialect = &ClickHouseDialect{}
 	default:
 		return fmt.Errorf("%q: unknown dialect", d)
 	}
@@ -155,11 +157,11 @@ WITH Migrations AS
 (
     SELECT tstamp, is_applied,
     ROW_NUMBER() OVER (ORDER BY tstamp) AS 'RowNumber'
-    FROM %s 
+    FROM %s
 	WHERE version_id=@p1
-) 
-SELECT tstamp, is_applied 
-FROM Migrations 
+)
+SELECT tstamp, is_applied
+FROM Migrations
 WHERE RowNumber BETWEEN 1 AND 2
 ORDER BY tstamp DESC
 `
@@ -281,4 +283,40 @@ func (m TiDBDialect) migrationSQL() string {
 
 func (m TiDBDialect) deleteVersionSQL() string {
 	return fmt.Sprintf("DELETE FROM %s WHERE version_id=?;", TableName())
+}
+
+////////////////////////////
+// ClickHouse
+////////////////////////////
+
+// ClickHouseDialect struct.
+type ClickHouseDialect struct{}
+
+func (m ClickHouseDialect) createVersionTableSQL() string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+      version_id Int64,
+      is_applied UInt8,
+      date Date default now(),
+      tstamp DateTime default now()
+    ) Engine = MergeTree(date, (date), 8192)`, TableName())
+}
+
+func (m ClickHouseDialect) dbVersionQuery(db *sql.DB) (*sql.Rows, error) {
+	rows, err := db.Query(fmt.Sprintf("SELECT version_id, is_applied FROM %s ORDER BY version_id DESC", TableName()))
+	if err != nil {
+		return nil, err
+	}
+	return rows, err
+}
+
+func (m ClickHouseDialect) insertVersionSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (version_id, is_applied) VALUES ($1, $2)", TableName())
+}
+
+func (m ClickHouseDialect) migrationSQL() string {
+	return fmt.Sprintf("SELECT tstamp, is_applied FROM %s WHERE version_id = $1 ORDER BY tstamp DESC LIMIT 1", TableName())
+}
+
+func (m ClickHouseDialect) deleteVersionSQL() string {
+	return fmt.Sprintf("ALTER TABLE %s DELETE WHERE version_id = $1", TableName())
 }

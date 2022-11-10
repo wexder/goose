@@ -1,15 +1,15 @@
 package goose
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	"path"
 	"runtime"
 	"sort"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 var (
@@ -124,13 +124,13 @@ func (ms Migrations) String() string {
 }
 
 // AddMigration adds a migration.
-func AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
+func AddMigration(up func(context.Context, *sql.Tx) error, down func(context.Context, *sql.Tx) error) {
 	_, filename, _, _ := runtime.Caller(1)
 	AddNamedMigration(filename, up, down)
 }
 
 // AddNamedMigration : Add a named migration.
-func AddNamedMigration(filename string, up func(*sql.Tx) error, down func(*sql.Tx) error) {
+func AddNamedMigration(filename string, up func(context.Context, *sql.Tx) error, down func(context.Context, *sql.Tx) error) {
 	v, _ := NumericComponent(filename)
 	migration := &Migration{Version: v, Next: -1, Previous: -1, Registered: true, UpFn: up, DownFn: down, Source: filename}
 
@@ -141,24 +141,22 @@ func AddNamedMigration(filename string, up func(*sql.Tx) error, down func(*sql.T
 	registeredGoMigrations[v] = migration
 }
 
-// CollectMigrations returns all the valid looking migration scripts in the
-// migrations folder and go func registry, and key them by version.
-func CollectMigrations(dirpath string, current, target int64) (Migrations, error) {
-	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%s directory does not exists", dirpath)
+func collectMigrationsFS(fsys fs.FS, dirpath string, current, target int64) (Migrations, error) {
+	if _, err := fs.Stat(fsys, dirpath); errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%s directory does not exist", dirpath)
 	}
 
 	var migrations Migrations
 
 	// SQL migration files.
-	sqlMigrationFiles, err := filepath.Glob(dirpath + "/**.sql")
+	sqlMigrationFiles, err := fs.Glob(fsys, path.Join(dirpath, "*.sql"))
 	if err != nil {
 		return nil, err
 	}
 	for _, file := range sqlMigrationFiles {
 		v, err := NumericComponent(file)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not parse SQL migration file %q: %w", file, err)
 		}
 		if versionFilter(v, current, target) {
 			migration := &Migration{Version: v, Next: -1, Previous: -1, Source: file}
@@ -170,7 +168,7 @@ func CollectMigrations(dirpath string, current, target int64) (Migrations, error
 	for _, migration := range registeredGoMigrations {
 		v, err := NumericComponent(migration.Source)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not parse go migration file %q: %w", migration.Source, err)
 		}
 		if versionFilter(v, current, target) {
 			migrations = append(migrations, migration)
@@ -178,7 +176,7 @@ func CollectMigrations(dirpath string, current, target int64) (Migrations, error
 	}
 
 	// Go migration files
-	goMigrationFiles, err := filepath.Glob(dirpath + "/**.go")
+	goMigrationFiles, err := fs.Glob(fsys, path.Join(dirpath, "*.go"))
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +202,12 @@ func CollectMigrations(dirpath string, current, target int64) (Migrations, error
 	return migrations, nil
 }
 
+// CollectMigrations returns all the valid looking migration scripts in the
+// migrations folder and go func registry, and key them by version.
+func CollectMigrations(dirpath string, current, target int64) (Migrations, error) {
+	return collectMigrationsFS(baseFS, dirpath, current, target)
+}
+
 func sortAndConnectMigrations(migrations Migrations) Migrations {
 	sort.Sort(migrations)
 
@@ -222,7 +226,6 @@ func sortAndConnectMigrations(migrations Migrations) Migrations {
 }
 
 func versionFilter(v, current, target int64) bool {
-
 	if target > current {
 		return v > current && v <= target
 	}
@@ -252,7 +255,7 @@ func EnsureDBVersion(db *sql.DB) (int64, error) {
 	for rows.Next() {
 		var row MigrationRecord
 		if err = rows.Scan(&row.VersionID, &row.IsApplied); err != nil {
-			return 0, errors.Wrap(err, "failed to scan row")
+			return 0, fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		// have we already marked this version to be skipped?
@@ -277,7 +280,7 @@ func EnsureDBVersion(db *sql.DB) (int64, error) {
 		toSkip = append(toSkip, row.VersionID)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, errors.Wrap(err, "failed to get next row")
+		return 0, fmt.Errorf("failed to get next row: %w", err)
 	}
 
 	return 0, ErrNoNextVersion

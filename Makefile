@@ -8,11 +8,19 @@ dist:
 	GOOS=windows GOARCH=amd64 go build -o ./bin/goose-windows64.exe  ./cmd/goose
 	GOOS=windows GOARCH=386   go build -o ./bin/goose-windows386.exe ./cmd/goose
 
-.PHONY: vendor
-vendor:
-	mv _go.mod go.mod
-	mv _go.sum go.sum
-	GO111MODULE=on go build -o ./bin/goose ./cmd/goose
-	GO111MODULE=on go mod vendor && GO111MODULE=on go mod tidy
-	mv go.mod _go.mod
-	mv go.sum _go.sum
+test-packages:
+	go test -v $$(go list ./... | grep -v -e /tests -e /bin -e /cmd -e /examples)
+
+test-e2e: test-e2e-postgres test-e2e-mysql
+
+test-e2e-postgres:
+	go test -v ./tests/e2e -dialect=postgres
+
+test-e2e-mysql:
+	go test -v ./tests/e2e -dialect=mysql
+
+test-clickhouse:
+	go test -timeout=10m -count=1 -race -v ./tests/clickhouse -test.short
+
+docker-cleanup:
+	docker stop -t=0 $$(docker ps --filter="label=goose_test" -aq)

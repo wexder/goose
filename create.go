@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"text/template"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 type tmplVars struct {
@@ -16,9 +14,39 @@ type tmplVars struct {
 	CamelName string
 }
 
+var (
+	sequential = false
+)
+
+// SetSequential set whether to use sequential versioning instead of timestamp based versioning
+func SetSequential(s bool) {
+	sequential = s
+}
+
 // Create writes a new blank migration file.
 func CreateWithTemplate(db *sql.DB, dir string, tmpl *template.Template, name, migrationType string) error {
-	version := time.Now().Format(timestampFormat)
+	var version string
+	if sequential {
+		// always use DirFS here because it's modifying operation
+		migrations, err := collectMigrationsFS(osFS{}, dir, minVersion, maxVersion)
+		if err != nil {
+			return err
+		}
+
+		vMigrations, err := migrations.versioned()
+		if err != nil {
+			return err
+		}
+
+		if last, err := vMigrations.Last(); err == nil {
+			version = fmt.Sprintf(seqVersionTemplate, last.Version+1)
+		} else {
+			version = fmt.Sprintf(seqVersionTemplate, int64(1))
+		}
+	} else {
+		version = time.Now().Format(timestampFormat)
+	}
+
 	filename := fmt.Sprintf("%v_%v.%v", version, snakeCase(name), migrationType)
 
 	if tmpl == nil {
@@ -31,12 +59,12 @@ func CreateWithTemplate(db *sql.DB, dir string, tmpl *template.Template, name, m
 
 	path := filepath.Join(dir, filename)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		return errors.Wrap(err, "failed to create migration file")
+		return fmt.Errorf("failed to create migration file: %w", err)
 	}
 
 	f, err := os.Create(path)
 	if err != nil {
-		return errors.Wrap(err, "failed to create migration file")
+		return fmt.Errorf("failed to create migration file: %w", err)
 	}
 	defer f.Close()
 
@@ -45,7 +73,7 @@ func CreateWithTemplate(db *sql.DB, dir string, tmpl *template.Template, name, m
 		CamelName: camelCase(name),
 	}
 	if err := tmpl.Execute(f, vars); err != nil {
-		return errors.Wrap(err, "failed to execute tmpl")
+		return fmt.Errorf("failed to execute tmpl: %w", err)
 	}
 
 	log.Printf("Created new file: %s\n", f.Name())
@@ -72,7 +100,7 @@ var goSQLMigrationTemplate = template.Must(template.New("goose.go-migration").Pa
 
 import (
 	"database/sql"
-	"github.com/pressly/goose"
+	"github.com/pressly/goose/v3"
 )
 
 func init() {

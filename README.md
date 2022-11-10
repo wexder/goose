@@ -1,8 +1,14 @@
-# goose
+# goose [![Goose CI](https://github.com/pressly/goose/actions/workflows/ci.yml/badge.svg)](https://github.com/pressly/goose/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/pressly/goose/v3.svg)](https://pkg.go.dev/github.com/pressly/goose/v3)
+
+<p align="center">
+  <img src="assets/goose_logo.png" width="125"">
+</p>
 
 Goose is a database migration tool. Manage your database schema by creating incremental SQL changes or Go functions.
 
-[![GoDoc Widget]][GoDoc] [![Travis Widget]][Travis]
+Starting with [v3.0.0](https://github.com/pressly/goose/releases/tag/v3.0.0) this project adds Go module support, but maintains backwards compatibility with older `v2.x.y` tags.
+
+Goose supports [embedding SQL migrations](#embedded-sql-migrations), which means you'll need go1.16 and up. If using go1.15 or lower, then pin [v3.0.1](https://github.com/pressly/goose/releases/tag/v3.0.1).
 
 ### Goals of this fork
 
@@ -23,17 +29,24 @@ Goose is a database migration tool. Manage your database schema by creating incr
       thus no driver `panic()` conflict within your codebase!
     - goose pkg doesn't have any vendor dependencies anymore
 - We use timestamped migrations by default but recommend a hybrid approach of using timestamps in the development process and sequential versions in production.
+- Supports missing (out-of-order) migrations with the `-allow-missing` flag, or if using as a library supply the functional option `goose.WithAllowMissing()` to Up, UpTo or UpByOne.
+- Supports applying ad-hoc migrations without tracking them in the schema table. Useful for seeding a database after migrations have been applied. Use `-no-versioning` flag or the functional option `goose.WithNoVersioning()`.
 
 # Install
 
-    $ go get -u github.com/pressly/goose/cmd/goose
+    $ go install github.com/pressly/goose/v3/cmd/goose@latest
 
 This will install the `goose` binary to your `$GOPATH/bin` directory.
 
 For a lite version of the binary without DB connection dependent commands, use the exclusive build tags:
 
-    $ go build -tags='no_postgres no_mysql no_sqlite3' -i -o goose ./cmd/goose
+    $ go build -tags='no_postgres no_mysql no_sqlite3' -o goose ./cmd/goose
 
+For macOS users `goose` is available as a [Homebrew Formulae](https://formulae.brew.sh/formula/goose#default):
+
+    $ brew install goose
+
+See the docs for more [installation instructions](https://pressly.github.io/goose/installation/).
 
 # Usage
 
@@ -46,6 +59,8 @@ Drivers:
     sqlite3
     mssql
     redshift
+    tidb
+    clickhouse
 
 Examples:
     goose sqlite3 ./foo.db status
@@ -54,7 +69,7 @@ Examples:
     goose sqlite3 ./foo.db create fetch_user_data go
     goose sqlite3 ./foo.db up
 
-    goose postgres "user=postgres dbname=postgres sslmode=disable" status
+    goose postgres "user=postgres password=postgres dbname=postgres sslmode=disable" status
     goose mysql "user:password@/dbname?parseTime=true" status
     goose redshift "postgres://user:password@qwerty.us-east-1.redshift.amazonaws.com:5439/db" status
     goose tidb "user:password@/dbname?parseTime=true" status
@@ -62,9 +77,22 @@ Examples:
 
 Options:
 
+  -allow-missing
+    	applies missing (out-of-order) migrations
+  -certfile string
+    	file path to root CA's certificates in pem format (only support on mysql)
   -dir string
     	directory with migration files (default ".")
   -h	print help
+  -no-versioning
+    	apply migration commands with no versioning, in file order, from directory pointed to
+  -s	use sequential numbering for new migrations
+  -ssl-cert string
+    	file path to SSL certificates in pem format (only support on mysql)
+  -ssl-key string
+    	file path to SSL key in pem format (only support on mysql)
+  -table string
+    	migrations table name (default "goose_db_version")
   -v	enable verbose mode
   -version
     	print version
@@ -155,6 +183,8 @@ Print the status of all migrations:
 
 Note: for MySQL [parseTime flag](https://github.com/go-sql-driver/mysql#parsetime) must be enabled.
 
+Note: for MySQL [`multiStatements`](https://dev.mysql.com/doc/internals/en/multi-statement.html) must be enabled. This is required when writing multiple queries separated by ';' characters in a single sql file.
+
 ## version
 
 Print the current version of the database:
@@ -218,6 +248,51 @@ language plpgsql;
 -- +goose StatementEnd
 ```
 
+## Embedded sql migrations
+Go 1.16 introduced new feature: [compile-time embedding](https://pkg.go.dev/embed/) files into binary and
+corresponding [filesystem abstraction](https://pkg.go.dev/io/fs/).
+
+This feature can be used only for applying existing migrations. Modifying operations such as
+`fix` and `create` will continue to operate on OS filesystem even if using embedded files. This is expected
+behaviour because `io/fs` interfaces allows read-only access.
+
+Make sure to configure the correct SQL dialect, see [dialect.go](./dialect.go) for supported SQL dialects.
+
+Example usage, assuming that SQL migrations are placed in the `migrations` directory:
+
+```go
+package main
+
+import (
+    "database/sql"
+    "embed"
+
+    "github.com/pressly/goose/v3"
+)
+
+//go:embed migrations/*.sql
+var embedMigrations embed.FS
+
+func main() {
+    var db *sql.DB
+    // setup database
+
+    goose.SetBaseFS(embedMigrations)
+
+    if err := goose.SetDialect("postgres"); err != nil {
+        panic(err)
+    }
+
+    if err := goose.Up(db, "migrations"); err != nil {
+        panic(err)
+    }
+
+    // run app
+}
+```
+
+Note that we pass `"migrations"` as directory argument in `Up` because embedding saves directory structure.
+
 ## Go Migrations
 
 1. Create your own goose binary, see [example](./examples/go-migrations)
@@ -233,7 +308,7 @@ package migrations
 import (
 	"database/sql"
 
-	"github.com/pressly/goose"
+	"github.com/pressly/goose/v3"
 )
 
 func init() {
@@ -257,18 +332,27 @@ func Down(tx *sql.Tx) error {
 }
 ```
 
+# Development
+
+This can be used to build local `goose` binaries without having the latest Go version installed locally.
+
+```bash
+DOCKER_BUILDKIT=1  docker build -f Dockerfile.local --output bin .
+```
+
 # Hybrid Versioning
 Please, read the [versioning problem](https://github.com/pressly/goose/issues/63#issuecomment-428681694) first.
 
-We strongly recommend adopting a hybrid versioning approach, using both timestamps and sequential numbers. Migrations created during the development process are timestamped and sequential versions are ran on production. We believe this method will prevent the problem of conflicting versions when writing software in a team environment.
+By default, if you attempt to apply missing (out-of-order) migrations `goose` will raise an error. However, If you want to apply these missing migrations pass goose the `-allow-missing` flag, or if using as a library supply the functional option `goose.WithAllowMissing()` to Up, UpTo or UpByOne.
+
+However, we strongly recommend adopting a hybrid versioning approach, using both timestamps and sequential numbers. Migrations created during the development process are timestamped and sequential versions are ran on production. We believe this method will prevent the problem of conflicting versions when writing software in a team environment.
 
 To help you adopt this approach, `create` will use the current timestamp as the migration version. When you're ready to deploy your migrations in a production environment, we also provide a helpful `fix` command to convert your migrations into sequential order, while preserving the timestamp ordering. We recommend running `fix` in the CI pipeline, and only when the migrations are ready for production.
+
+## Credit
+
+The gopher mascot was designed by [Renée French](https://reneefrench.blogspot.com/) / [CC 3.0.](https://creativecommons.org/licenses/by/3.0/) For more info check out the [Go Blog](https://go.dev/blog/gopher). Adapted by Ellen.
 
 ## License
 
 Licensed under [MIT License](./LICENSE)
-
-[GoDoc]: https://godoc.org/github.com/pressly/goose
-[GoDoc Widget]: https://godoc.org/github.com/pressly/goose?status.svg
-[Travis]: https://travis-ci.org/pressly/goose
-[Travis Widget]: https://travis-ci.org/pressly/goose.svg?branch=master
