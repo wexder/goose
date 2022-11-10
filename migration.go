@@ -25,8 +25,8 @@ type Migration struct {
 	Previous     int64  // previous version, -1 if none
 	Source       string // path to .sql script or go file
 	Registered   bool
-	UpFn         func(*sql.Tx) error // Up go migration function
-	DownFn       func(*sql.Tx) error // Down go migration function
+	UpFn         func(context.Context, *sql.Tx) error // Up go migration function
+	DownFn       func(context.Context, *sql.Tx) error // Down go migration function
 	noVersioning bool
 }
 
@@ -104,7 +104,7 @@ func (m *Migration) run(ctx context.Context, db *sql.DB, direction bool) error {
 
 		if fn != nil {
 			// Run Go migration function.
-			if err := fn(tx); err != nil {
+			if err := fn(ctx, tx); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("ERROR %v: failed to run Go migration function %T: %w", filepath.Base(m.Source), fn, err)
 			}

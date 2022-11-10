@@ -1,6 +1,7 @@
 package goose
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -123,13 +124,13 @@ func (ms Migrations) String() string {
 }
 
 // AddMigration adds a migration.
-func AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
+func AddMigration(up func(context.Context, *sql.Tx) error, down func(context.Context, *sql.Tx) error) {
 	_, filename, _, _ := runtime.Caller(1)
 	AddNamedMigration(filename, up, down)
 }
 
 // AddNamedMigration : Add a named migration.
-func AddNamedMigration(filename string, up func(*sql.Tx) error, down func(*sql.Tx) error) {
+func AddNamedMigration(filename string, up func(context.Context, *sql.Tx) error, down func(context.Context, *sql.Tx) error) {
 	v, _ := NumericComponent(filename)
 	migration := &Migration{Version: v, Next: -1, Previous: -1, Registered: true, UpFn: up, DownFn: down, Source: filename}
 
@@ -225,7 +226,6 @@ func sortAndConnectMigrations(migrations Migrations) Migrations {
 }
 
 func versionFilter(v, current, target int64) bool {
-
 	if target > current {
 		return v > current && v <= target
 	}
